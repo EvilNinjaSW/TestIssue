@@ -8,7 +8,6 @@ enum class ProtocolId
     Hello,
     Login,
     Message,
-    SuperMessage,
     Ping,
     Logout
 };
@@ -463,92 +462,6 @@ public:
     }
 
     ~MessageOut() override = default;
-};
-
-class SuperMessageIn :
-    public SessionInfo
-{
-public:
-    SuperMessageIn(std::string &&data)
-    {
-        nlohmann::json json = nlohmann::json::parse(data);
-
-        mCommand = json.at("command").get<std::string>();
-
-        if (mCommand != "message")
-            throw std::runtime_error("inaccessable state");
-
-        mId = json.at("id").get<int>();
-        mBody = json.at("body").get<std::string>();
-        mSender_login = json.at("sender_login");
-        mSession = json.at("session").get<std::string>();
-        mProtocolId = ProtocolId::SuperMessage;
-        mTransision = ProtocolIdMove::ExpectAfterAuth;
-    }
-
-    ~SuperMessageIn() override = default;
-
-    std::string createResponse(bool isGood = true) override
-    {
-        nlohmann::json json;
-        std::stringstream temp;
-
-        mCommand = u8R"(message_reply)";
-
-        if (isGood)
-        {
-            mStatus = u8R"(ok)";
-            mClient_id = u8R"(client_id todo)";
-        }
-        else
-        {
-            mStatus = u8R"(failed)";
-            mMessage = u8R"(Ошибка при отправке сообщения.)";
-        }
-
-        temp << u8R"({"id":)" << mId <<
-            u8R"(,"command":")" << mCommand <<
-            u8R"(","status":")" << mStatus;
-
-        if (!mClient_id.empty())
-            temp << u8R"(","client_id":")" << mSession;
-
-        if (!mMessage.empty())
-            temp << u8R"(","message":")" << mMessage;
-
-        temp << u8R"("})";
-
-        return json.parse(temp.str()).dump();
-    }
-};
-
-class SuperMessageOut :
-    public SessionInfo
-{
-public:
-    SuperMessageOut(std::string &&data)
-    {
-        nlohmann::json json = nlohmann::json::parse(data);
-
-        if (!json["command"].is_null())
-            mCommand = json.at("command").get<std::string>();
-
-        if (!json["id"].is_null())
-            mId = json.at("id").get<int>();
-
-        if (!json["status"].is_null())
-            mStatus = json.at("status").get<std::string>();
-
-        if (!json["message"].is_null())
-            mMessage = json.at("message").get<std::string>();
-
-        if (!json["client_id"].is_null())
-            mClient_id = json.at("client_id").get<std::string>();
-
-        mProtocolId = ProtocolId::SuperMessage;
-    }
-
-    ~SuperMessageOut() override = default;
 };
 
 class PingIn :

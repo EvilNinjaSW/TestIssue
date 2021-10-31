@@ -3,6 +3,8 @@
 
 #include <cstdlib>
 #include <string>
+#include <locale>
+#include <codecvt>
 #include <sstream>
 #include <array>
 #include <vector>
@@ -20,16 +22,12 @@
 
 #pragma comment(lib, "ws2_32.lib")
 
-#define SEPARATE_CLIENT
-
 #define TH_AMOUNT 1
 
 std::thread gTestThreads[TH_AMOUNT];
 
 std::mutex gClientReady[TH_AMOUNT];
-std::mutex gServerReady;
 std::condition_variable gWaitClient[TH_AMOUNT];
-std::condition_variable gWaitServer;
 
 //test purpose only
 int gHello { };
@@ -78,23 +76,6 @@ void setClientReady(int relation)
     std::unique_lock<std::mutex> lock(gClientReady[relation]);
 
     gWaitClient[relation].notify_one();
-}
-
-void waitForServerReady(void)
-{
-    std::unique_lock<decltype (gServerReady)> lock(gServerReady);
-
-    gWaitServer.wait(lock/*, []()
-    {
-        return false;
-    }*/);
-}
-
-void setServerReady(void)
-{
-    std::unique_lock<decltype (gServerReady)> lock(gServerReady);
-
-    gWaitServer.notify_one();
 }
 
 #define RECV_BUF 512
@@ -190,13 +171,13 @@ public:
                              ProtocolIdMove::ExpectLogin == mGenericProtocol.getTransision() &&
                              ProtocolId::Login == mGenericProtocol.getProtocol())
                     {
-                        auto login = LoginIn(std::move(actual));
-
                         for (const auto &element : *participantsDb.get())
                         {
                             if (element.mLogin == mGenericProtocol.getLogin())
                                 if (element.mPassword == mGenericProtocol.getPassword())
                                 {
+                                    auto login = LoginIn(std::move(actual));
+
                                     answer = login.createResponse();
                                     mGenericProtocol = login;
                                     mGenericProtocol.switchStateUp();
@@ -206,8 +187,7 @@ public:
                                 }
                         }
 
-                        answer = login.createResponse(false);
-                        mGenericProtocol = login;
+                        answer = mGenericProtocol.createResponse(false);
                         return RecognitionResult::Success;
                     }
                     else if (ProtocolIdMove::ExpectAfterAuth == sessionInfo.getTransision() &&
@@ -272,32 +252,7 @@ public:
                     }
                     else
                     {
-                        if (ProtocolId::Login == mGenericProtocol.getProtocol())
-                        {
-                            auto login = LoginIn(std::move(actual));
-
-                            answer = login.createResponse(false);
-                        }
-                        else if (ProtocolId::Message == mGenericProtocol.getProtocol())
-                        {
-                            auto message = MessageIn(std::move(actual));
-
-                            answer = message.createResponse(false);
-                        }
-                        else if (ProtocolId::Ping == mGenericProtocol.getProtocol())
-                        {
-                            auto ping = PingIn(std::move(actual));
-
-                            answer = ping.createResponse(false);
-                        }
-                        else if (ProtocolId::Logout == mGenericProtocol.getProtocol())
-                        {
-                            auto logout = LogoutIn(std::move(actual));
-
-                            answer = logout.createResponse(false);
-                        }
-
-                        mGenericProtocol = sessionInfo;
+                        answer = sessionInfo.createResponse();
                         return RecognitionResult::Success;
                     }
 
@@ -468,7 +423,7 @@ private:
                     mEndExchange = true;
 
                     State state;
-;
+                    ;
                     if constexpr (std::is_same_v<T..., ProtocolTypeServer>)
                         state = recognize(std::string(givenData));
                     else if (std::is_same_v<T..., ProtocolTypeClient>)
@@ -507,7 +462,7 @@ private:
             {
                 //if (!mGenericProtocol)
                 //{
-                    mGenericProtocol = HelloIn(std::move(data));
+                mGenericProtocol = HelloIn(std::move(data));
                 //}
                 //else
                  //   return State::Wrong;
@@ -1273,7 +1228,6 @@ protected:
 
                             for (; !element.second.mData.empty();)
                             {
-                                //Protocol localProtocol;
                                 std::string answer;
 
                                 if (Protocol::RecognitionResult result;
@@ -1315,8 +1269,6 @@ protected:
                     {
                         if (element.second.mSocket == rwSocket)
                         {
-                            //Protocol protocol;
-
                             siteId = element.first;
                             element.second.mData.append(block.data(), length);
 
@@ -1432,46 +1384,25 @@ private:
 };
 
 //
-Server *pServer;
-#ifndef SEPARATE_CLIENT
 std::array<Client *, TH_AMOUNT> pClient;
-#endif
 //
 
-bool createServerDb(std::shared_ptr<tParticipantsDb> &sessionsDb)
+void __cdecl signal_handle(int sig_num)
 {
-    tParticipantsDb simpleParticipantsDb;
-
-    for (int i { }; i < TH_AMOUNT; ++i)
-        simpleParticipantsDb.emplace_back(std::string(u8R"(test_login)") + std::to_string(i), u8R"(test_password)" + std::to_string(i));
-
-    sessionsDb = std::make_shared<tParticipantsDb>(simpleParticipantsDb);
-
-    return { true };
+    if (SIGINT == sig_num)
+        exit(0);
 }
 
-bool connectServer(uint64_t id, SessionInfo &sessionInfo)
-{
-    sessionInfo.initServerSession(id);
-    sessionInfo.provideVitalData("plain-auth");
-
-    return { true };
-}
-#ifndef SEPARATE_CLIENT
 bool connectClient(uint64_t id, SessionInfo &sessionInfo)
 {
     return { true };
 }
-#endif
-bool readServer(SOCKET socket, std::stringstream &&data)
-{
-    return pServer->write(socket, std::move(data));
-}
-#ifndef SEPARATE_CLIENT
+
 struct sessInfoTemp
 {
 public:
     sessInfoTemp(const std::string login, const std::string password) :
+        mId { 1 },
         mLogin { login },
         mPassword { password },
         mIsRegistered { }
@@ -1481,6 +1412,7 @@ public:
     std::string mLogin;
     std::string mPassword;
     std::string mSession;
+    std::string mMessage;
     bool mIsRegistered;
 };
 
@@ -1498,70 +1430,38 @@ bool readClient(SOCKET socket, std::stringstream &&data)
         switch (responseInfo.getProtocol())
         {
         case ProtocolId::Hello:
-        {
-            decltype(sessData)::size_type ch { };
-
-            {
-                std::lock_guard<std::mutex> lock(sessMutex);
-
-                ++gHello; 
-                std::cout << "Hello " << std::to_string(gHello) << std::endl;
-
-                for (decltype (sessData)::size_type i { }; i < sessData.size(); ++i)
-                {
-                    if (!sessData[i].mIsRegistered)
-                    {
-                        ch = i;
-                        sessData[i].mIsRegistered = true;
-                        break;
-                    }
-                }
-            }
-
-            return pClient[num]->write(0, requestLogin(2, sessData[ch].mLogin, sessData[ch].mPassword));
-        }
+            std::cout << std::endl << "Hello Ok" << std::endl;
             break;
         case ProtocolId::Login:
-            ++gLogin;
-            std::cout << "Login " << std::to_string(gLogin) << std::endl;
-
             if (responseInfo.hasResponse())
             {
-                {
-                    std::lock_guard<std::mutex> lock(sessMutex);
-
-                    sessData[num].mSession = responseInfo.getSession();
-                }
-
-                return pClient[num]->write(0, std::move(requestMessage(responseInfo.getId(), u8R"(Test message.)", sessData[num].mSession)));
+                sessData[num].mSession = responseInfo.getSession();
+                std::cout << std::endl << "Login Ok" << std::endl;
             }
             else
-                std::cout << responseInfo.getMessage();
+                std::cout << std::endl << "Login Fail" << std::endl;
 
             break;
         case ProtocolId::Message:
-            ++gMessage;
-            std::cout << "Message " << std::to_string(gMessage) << std::endl;
-
             if (responseInfo.hasResponse())
-                return pClient[num]->write(0, std::move(requestPing(responseInfo.getId(), sessData[num].mSession)));
+                std::cout << std::endl << "Message Ok" << std::endl;
             else
-                std::cout << responseInfo.getMessage();
+                std::cout << std::endl << "Message Fail" << std::endl;
 
             break;
         case ProtocolId::Ping:
-            ++gPing;
-            std::cout << "Ping " << std::to_string(gPing) << std::endl;
-
             if (responseInfo.hasResponse())
-                return pClient[num]->write(0, std::move(requestLogout(responseInfo.getId(), sessData[num].mSession)));
+                std::cout << std::endl << "Ping Ok" << std::endl;
             else
-                std::cout << responseInfo.getMessage();
+                std::cout << std::endl << "Ping Fail" << std::endl;
 
             break;
         case ProtocolId::Logout:
-            ++gLogout;
-            std::cout << "Logout " << std::to_string(gLogout) << std::endl;
+            if (responseInfo.hasResponse())
+                std::cout << std::endl << "Logout Ok" << std::endl;
+            else
+                std::cout << std::endl << "logout Fail" << std::endl;
+
             setClientReady(num);
             break;
         case ProtocolId::None:
@@ -1576,41 +1476,111 @@ bool readClient(SOCKET socket, std::stringstream &&data)
 
 int gTotalClientsRemain;
 
-void clientTestThread(int relation)
+void subMenu(int select)
 {
-    std::function<bool(uint64_t, SessionInfo &)> fnClientConnect { connectClient };
-    std::function<bool(SOCKET, std::stringstream &&)> fnRead { readClient };
+    system("cls");
 
-    Client *client = new Client(fnRead,
-                                fnClientConnect, relation);
-    pClient[relation] = client;
-    client->start();
-    setClientReady(relation);
-    client->write(0, requestHello(relation + 1));
-    waitForClientReady(relation);
-    client->stop();
-    delete client;
-    pClient[relation] = nullptr;
+    switch (select)
+    {
+    case 1:
+    {
+        if (!sessData[0].mIsRegistered)
+        {
+            std::cout << "Приветствие ... " << std::endl;
+            pClient[0]->write(0, requestHello(sessData[0].mId));
+        }
+        else
+            std::cout << "Приветствие уже отправлялось." << std::endl;
 
-    for (int i { }; i < TH_AMOUNT; ++i)
-        if (nullptr != pClient[i])
+        system("pause");
+    }
+        break;
+    case 2:
+    {
+        std::string login, password;
+
+        std::cout << "Авторизация" << std::endl <<
+            "Введите login: ";
+        std::cin >> login;
+        std::cout << "Введите пароль: ";
+        std::cin >> password;
+        sessData[0].mLogin = login;
+        sessData[0].mPassword = password;
+        pClient[0]->write(0, requestLogin(sessData[0].mId, sessData[0].mLogin, sessData[0].mPassword));
+        system("pause");
+    }
+        break;
+    case 3:
+    {
+        std::string message;
+
+        std::cout << "Отправка сообщения серверу" << std::endl <<
+            "Введите сообщение: ";
+        std::cin >> message;
+        sessData[0].mMessage = message;
+        pClient[0]->write(0, std::move(requestMessage(sessData[0].mId, sessData[0].mMessage, sessData[0].mSession)));
+        system("pause");
+    }
+        break;
+    case 4:
+    {
+        std::cout << "Команда ping ... " << std::endl;
+        pClient[0]->write(0, std::move(requestPing(sessData[0].mId, sessData[0].mSession)));
+        system("pause");
+    }
+        break;
+    case 5:
+    {
+        std::cout << "Отключение от сервера " << std::endl;
+        pClient[0]->write(0, std::move(requestLogout(sessData[0].mId, sessData[0].mSession)));
+        system("pause");
+    }
+        break;
+    }
+
+    std::cin.clear();
+}
+
+void menu(void)
+{
+    std::string select;
+
+    do
+    {
+        system("cls");
+        std::cout << "Клиент запущен." <<
+            std::endl << "Выберите пункт: " << std::endl <<
+            "1 - Приветствие" << std::endl <<
+            "2 - Авторизация (открытым текстом пока)" << std::endl <<
+            "3 - Отправка сообщения" << std::endl <<
+            "4 - Команда ping" << std::endl <<
+            "5 - Отключение от сервера" << std::endl << std::endl <<
+            "0 - Выйти" << std::endl;
+
+        std::cin >> select;
+
+        if (select == "0")
             break;
+
+        if (select == "1")
+            subMenu(1);
+        else if (select == "2")
+            subMenu(2);
+        else if (select == "3")
+            subMenu(3);
+        else if (select == "4")
+            subMenu(4);
+        else if (select == "5")
+        {
+            subMenu(5);
+            break;
+        }
         else
         {
-            if (TH_AMOUNT == i + 1)
-            {
-                setServerReady();
-                break;
-            }
+            std::cout << "Неверный пункт. Повторить ввод" << std::endl;
+            system("pause");
         }
-
-    ++gTotalClientsRemain;
-}
-#endif
-void __cdecl signal_handle(int sig_num)
-{
-    if (SIGINT == sig_num)
-        exit(0);
+    } while (true);
 }
 
 int main(int argc, char **argv)
@@ -1620,36 +1590,42 @@ int main(int argc, char **argv)
     std::cout.imbue(appLocale);
     std::cin.imbue(appLocale);
 
-    std::stringstream ss;
+    std::function<bool(uint64_t, SessionInfo &)> fnClientConnect { connectClient };
+    std::function<bool(SOCKET, std::stringstream &&)> fnRead { readClient };
 
-    ss << "Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.Simple text test.";
-
-    signal(SIGINT, signal_handle);
-    std::function<bool(uint64_t, SessionInfo &)> fnClientConnect { connectServer };
-    std::function<bool(SOCKET, std::stringstream &&)> fnClientRead { readServer };
-    std::function<bool(std::shared_ptr<tParticipantsDb> &)> fnCreateServerDb { createServerDb };
-    Server server(fnClientRead, fnClientConnect, fnCreateServerDb);
-
-    //
-    pServer = &server;
-    //
-#ifndef SEPARATE_CLIENT
-    for (int i { }; i < TH_AMOUNT; ++i)
-        sessData.emplace_back(std::string(u8R"(test_login)") + std::to_string(i), u8R"(test_password)" + std::to_string(i));
-#endif
-    server.start();
-    setServerReady();
-#ifndef SEPARATE_CLIENT
-    std::this_thread::sleep_for(std::chrono::seconds(1));
+    Client *client = new Client(fnRead,
+                                fnClientConnect, 0);
+    pClient[0] = client;
 
     for (int i { }; i < TH_AMOUNT; ++i)
-        gTestThreads[i] = std::move(std::thread(clientTestThread, i));
-#endif
-    waitForServerReady();
-#ifndef SEPARATE_CLIENT
+        sessData.emplace_back(std::string(u8R"(test_login!)") + std::to_string(i), u8R"(test_password!)" + std::to_string(i));
+
+    if (client->start())
+    {
+        setClientReady(0);
+        menu();
+        //waitForClientReady(0);
+        client->stop();
+    }
+    else
+    {
+        std::cout << "Клиент не удалось запустить." <<
+            std::endl << "Проверьте запуск сервера." << std::endl;
+    }
+
+    delete client;
+    pClient[0] = nullptr;
+
     for (int i { }; i < TH_AMOUNT; ++i)
-        gTestThreads[i].join();
-#endif
-    server.stop();
+        if (nullptr != pClient[i])
+            break;
+        else
+        {
+            if (TH_AMOUNT == i + 1)
+                break;
+        }
+
+    ++gTotalClientsRemain;
+
     return EXIT_SUCCESS;
 }
